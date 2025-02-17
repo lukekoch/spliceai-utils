@@ -1,0 +1,253 @@
+#!/beegfs/software/spliceai/spliceai/bin/python3
+
+"""
+This script runs SpliceAI on a given segment of a selected assembly and write positional donor and acceptor scores to
+stdout. The first two rows are always variable step wiggle file header (one for donor, one for acceptor values). Donor
+and acceptor values are printed in alternating order. Rows after first two follow the format:
+<'donor'/'acceptor'> TAB value. If the output stream is written to a file
+"""
+import os
+import subprocess
+import sys
+from argparse import ArgumentParser
+import numpy as np
+
+__author__ = "Lucas Koch"
+__version__ = "1.2"
+
+parser = ArgumentParser()
+# positional arguments
+parser.add_argument("assembly", type=str, metavar="assembly",
+                    help="Name of the assembly e.g. hg38")
+parser.add_argument("chrom", type=str, metavar="chromosome",
+                    help="Chromosome ID e.g. chr7")
+parser.add_argument("start", type=int, metavar="start coordinate",
+                    help="Start position (always < stop)")
+parser.add_argument("stop", type=int, metavar="stop coordinate",
+                    help="Stop position (always > start)")
+parser.add_argument("strand",
+                    type=str,
+                    metavar="strand",
+                    help="+/- strand",
+                    choices=['+', '-'])
+parser.add_argument("wiggle_start", type=int, metavar="wiggle start coordinate",
+                    help="Start coords in wiggle file")
+parser.add_argument("wiggle_stop", type=int, metavar="wiggle stop coordinate",
+                    help="Stop coords in wiggle file")
+parser.add_argument("-resolution",
+                    required=False,
+                    type=int,
+                    default=5,
+                    metavar="5",
+                    help="Round to x digits in wiggle tracks")
+parser.add_argument("-floor",
+                    required=False,
+                    type=float,
+                    default=0.001,
+                    metavar="0.001",
+                    help="To save disk space , we output 0 if the prob is < this number (default 0.001)")
+parser.add_argument("-chrom_sizes",
+                    required=False,
+                    type=str,
+                    metavar="path",
+                    help="Path to chrom.sizes, required for --chrom_mode")
+parser.add_argument("--use_path",
+                    action="store_const",
+                    const=True,
+                    help="Interpret the assembly name as path to a .2bit file")
+parser.add_argument("--chrom_mode",
+                    action="store_const",
+                    const=True,
+                    help="Run the entire scaffold/chrom sequence. Requires -chrom_sizes")
+parser.add_argument("--verbose",
+                    action="store_const",
+                    const=True,
+                    help="Enable verbose output. Include TensorFlow debug messages.")
+
+
+def rev_comp(seq: str) -> str:
+    """
+    Naive rev-comp
+    :param seq: DNA Sequence
+    :return: Reverse complement of given sequence
+    """
+    base_dict = {"N": "N", "A": "T", "T": "A", "C": "G", "G": "C"}
+    rev_seq = ""
+    for base in seq[::-1]:
+        rev_seq += base_dict[base]
+    return rev_seq
+
+
+def main(args):
+    """
+    Main program loop
+    :return:
+    """
+
+    # Suppress TensorFlow logging
+    if not args.verbose:
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+    # moved imports here to reduce overhead e.g. when using --help
+    from keras.models import load_model
+    from pkg_resources import resource_filename
+    from spliceai.utils import one_hot_encode
+
+    # this code was provided by the SpliceAI authors
+    context = 10000
+    paths = ('models/spliceai{}.h5'.format(x) for x in range(1, 6))
+    models = [load_model(resource_filename('spliceai', x), compile=False) for x in paths]
+    if args.verbose:
+        print("Finished loading models", file=sys.stderr)
+
+    if args.use_path:
+        seq_path = args.assembly
+    else:
+        seq_path = f"/projects/hillerlab/genome/gbdb-HL/{args.assembly}/{args.assembly}.2bit"
+
+
+    # We need the chrom.sizes if running full chromosomes
+    chrom_dict = dict()
+    if args.chrom_mode:
+        if not args.chrom_sizes:
+            print("You need to provide -chrom_sizes if running in chrom mode!")
+            exit(1)
+        else:
+            with open(args.chrom_sizes, 'r') as chrom_file:
+                for line in chrom_file:
+                    cols = line.strip().split('\t')
+                    chrom_dict[cols[0]] = int(cols[1])
+
+    # split either for chrom list of for chrom model
+    for chrom in args.chrom.split(","):
+        # run full chromosomes
+        if args.chrom_mode:
+            # set to full range
+            if not chrom_dict.get(chrom):
+                print(f"Chromosome {chrom} not found in chrom.sizes!")
+                exit(1)
+
+            args.start = 1
+            args.stop = chrom_dict[chrom]
+            args.wiggle_start = 1
+            args.wiggle_stop = chrom_dict[chrom]
+
+        twobit_args = ['twoBitToFa', f"{seq_path}:{chrom}:{args.start-1}-{args.stop}", "stdout", "-noMask"]
+        if args.verbose:
+            print(f"Fetching sequence as {' '.join(twobit_args)}", file=sys.stderr)
+        seq = subprocess.run(twobit_args, stdout=subprocess.PIPE).stdout.decode('utf-8').rstrip()
+
+        # Trim the header and linearize the sequence
+        formatted_seq = "".join(line.strip() for line in seq.split("\n")[1:])
+
+        if args.strand == "-":
+            formatted_seq = rev_comp(formatted_seq)
+
+        # sanity check
+        if args.verbose:
+            print("The first 20 bases are:", formatted_seq[0:20], file=sys.stderr)
+        x = one_hot_encode('N' * (context // 2) + formatted_seq + 'N' * (context // 2))[None, :]
+        y = np.mean([models[m].predict(x) for m in range(5)], axis=0)
+
+        # positional probabilities
+        acceptor_prob = y[0, :, 1]
+        donor_prob = y[0, :, 2]
+
+        if args.chrom_mode:
+            start_index = 0
+            stop_index = args.stop
+        else:
+            # Leave wiggle space
+            start_index = args.wiggle_start - args.start
+            stop_index = args.stop - (args.stop - args.wiggle_stop)
+
+        # input checks
+        if start_index < 0 or stop_index < 0:
+            print("Negative value encountered in wiggle index")
+            sys.exit(1)
+
+        # plus strand
+        if args.chrom_mode:
+            if args.strand == '+':
+                # Padding with zero-vals
+                acceptor_prob = acceptor_prob[1:]
+                acceptor_prob = np.concatenate((acceptor_prob, [0.0, 0.0, 0.0]))
+                donor_prob = np.concatenate(([0.0], donor_prob))
+            elif args.strand == '-':
+                # Padding with zero-vals
+                acceptor_prob = np.concatenate((acceptor_prob, [0.0]))
+                acceptor_prob = acceptor_prob[::-1]
+                donor_prob = donor_prob[::-1]
+                donor_prob = donor_prob[1:]
+                donor_prob = np.concatenate((donor_prob, [0.0, 0.0]))
+
+        else:
+            if args.strand == '+':
+                # if we start at coordinate zero we can't shift a null
+                # => choose arbitrary value 0.0
+                if start_index == 0:
+                    donor_prob = donor_prob[start_index:stop_index]
+                    donor_prob = np.insert(donor_prob, 0, 0.0)
+                else:
+                    donor_prob = donor_prob[start_index-1:stop_index]
+
+                # handle acceptors
+                if args.stop == args.wiggle_stop:
+                    acceptor_prob = acceptor_prob[start_index+1:stop_index]
+                    acceptor_prob = np.insert(acceptor_prob, len(acceptor_prob)-1, 0.0)
+                else:
+                    acceptor_prob = acceptor_prob[start_index+1:stop_index+1]
+
+            # minus strand
+            else:
+                # if we start at coordinate zero we can't shift a null
+                # => choose arbitrary value 0.0
+                if start_index == 0:
+                    acceptor_prob = acceptor_prob[::-1][start_index:stop_index + 1]
+                    acceptor_prob = np.insert(acceptor_prob, 0, 0.0)
+                else:
+                    acceptor_prob = acceptor_prob[::-1][start_index - 1:stop_index + 1]
+
+                # handle donors
+                if args.stop == args.wiggle_stop:
+                    donor_prob = donor_prob[::-1][start_index + 1:stop_index + 1]
+                    donor_prob = np.insert(donor_prob, len(donor_prob) - 1, 0.0)
+                else:
+                    donor_prob = donor_prob[::-1][start_index+1:stop_index+1]
+
+
+        # Print wiggle headers
+        print(f"acceptor\tfixedStep chrom={chrom} start={args.wiggle_start} step=1", file=sys.stdout)
+        print(f"donor\tfixedStep chrom={chrom} start={args.wiggle_start} step=1", file=sys.stdout)
+
+        # Compress small acceptor values
+        for i, x in enumerate(acceptor_prob):
+            if x < args.floor:
+                acceptor_prob[i] = 0.0
+
+        # Compress small donor values
+        for i, x in enumerate(donor_prob):
+            if x < args.floor:
+                donor_prob[i] = 0.0
+
+
+        # We write acceptor and donor probs alternating to stdout.
+        # This format is resolved by the perl wrapper script.
+        # Writing this format to file introduces file size overhead.
+        my_format = f".{args.resolution}f"
+        for i in range(args.wiggle_stop - args.wiggle_start + 1):
+            if acceptor_prob[i] != 0:
+                print(f"acceptor\t{format(acceptor_prob[i], my_format)}", file=sys.stdout)
+            else:
+                print(f"acceptor\t0", file=sys.stdout)
+
+            if donor_prob[i] != 0:
+                print(f"donor\t{format(donor_prob[i], my_format)}", file=sys.stdout)
+            else:
+                print(f"donor\t0", file=sys.stdout)
+
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+    main(args)
+

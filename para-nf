@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# Default values
+QUEUE="batch"
+MEMORY="4GB"
+CPUS=1
+
+# Print usage function
+usage() {
+    echo "Usage: $0 joblist [--queue QUEUE] [--memory MEMORY] [--cpus CPUS]"
+    exit 1
+}
+
+if [[ $# -lt 1 ]]; then
+    usage
+fi
+
+
+JOBLIST=$1
+shift
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --queue)
+            QUEUE="$2"
+            shift 2
+            ;;
+        --memory)
+            MEMORY="$2"
+            shift 2
+            ;;
+        --cpus)
+            CPUS="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# Run Nextflow with the given parameters
+nextflow run /projects/hillerlab/genome/src/para-nf/nf-joblist.nf  --joblist "$JOBLIST" --queue "$QUEUE" --memory "$MEMORY" --cpus "$CPUS"
