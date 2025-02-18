@@ -1,4 +1,4 @@
-#!/beegfs/software/spliceai/spliceai/bin/python3
+#!/path/to/bin/python3
 
 """
 This script runs SpliceAI on a given segment of a selected assembly and write positional donor and acceptor scores to
@@ -95,7 +95,7 @@ def main(args):
 
     # this code was provided by the SpliceAI authors
     context = 10000
-    paths = ('models/spliceai{}.h5'.format(x) for x in range(1, 6))
+    paths = ('/path/to/models/spliceai{}.h5'.format(x) for x in range(1, 6))
     models = [load_model(resource_filename('spliceai', x), compile=False) for x in paths]
     if args.verbose:
         print("Finished loading models", file=sys.stderr)

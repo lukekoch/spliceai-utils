@@ -25,7 +25,7 @@ my $outFileDoMinus = "spliceAiDonorMinus";
 my $outFileAccPlus = "spliceAiAcceptorPlus";
 my $outFileAccMinus = "spliceAiAcceptorMinus";
 
-my $spliceAiWrapper = "pipeable_spliceai_to_wiggle";  # the wrapper that calls spliceAi and produced wig output
+my $spliceAiWrapper = "pipeable_spliceai_to_wiggle_twoBit";  # the wrapper that calls spliceAi and produced wig output
 
 my $setToZero = 0.001;
 my $resolution = 4;

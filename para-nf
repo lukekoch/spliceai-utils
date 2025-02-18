@@ -42,4 +42,4 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Run Nextflow with the given parameters
-nextflow run /projects/hillerlab/genome/src/para-nf/nf-joblist.nf  --joblist "$JOBLIST" --queue "$QUEUE" --memory "$MEMORY" --cpus "$CPUS"
+nextflow run /path/to/nf-joblist.nf  --joblist "$JOBLIST" --queue "$QUEUE" --memory "$MEMORY" --cpus "$CPUS"
