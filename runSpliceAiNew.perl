@@ -16,7 +16,6 @@ my $doNotLoad = 0;
 my $chunkSize = 6000000;
 my $chunkOverlap = 50000;
 my $maxNumScaffoldsPerJob = 500;
-my $queue = "day";
 my $minScaffoldSize = 10;  # ignore scaffolds shorter than this
 my $outDir = "";
 my $keepTempFiles = 0;
@@ -32,25 +31,19 @@ my $resolution = 4;
 
 my $seed = 123; # for shuffling the scaffold order
 
-my $genomePath = $ENV{'genomePath'};
-die "ERROR: environment variable genomePath is not set\n" if ($genomePath eq "");
-
 # howto
 my $usage = "runSpliceAi.perl assembly [optional parameters]\
 \
-Assembly is either the assembly name (e.g. hg38), for which a 2bit file /projects/hillerlab/genome/assembly/assembly.2bit should exist,
- or the full path to the assembly.2bit (e.g. /projects/hillerlab/genome/hg38/hg38.2bit)
+Assembly is the full path to the assembly.2bit file (e.g. /path/to/genome/genome.2bit)
 Optional parameters:
--doNotLoad                do not rsync the generated bigWig files to genome
 -chunkSize                split genome into chunks of that size in bp (default $chunkSize bp)
 -chunkOverlap             have each chunk overlap by that many bp to avoid boundary effects (default $chunkOverlap)
 -maxNumScaffoldsPerJob    for small scaffolds, we run spliceAi for up to (default $maxNumScaffoldsPerJob) scaffolds per cluster job
 -minScaffoldSize          ignore scaffolds shorter than (default $minScaffoldSize)
--queue                    Slurm queue for para make of the spliceAi step (default $queue)
 -resolution int           we round the spliceAi probs to that many digits after the comma. (default $resolution, so e.g. 0.029)
 -setToZero double         to save space in the bigWig, we output prob 0 if the prob is < this number (default $setToZero)
 \
--outDir                   full path to output directory (default /projects/hillerlab/genome/\$assembly/spliceAi/)
+-outDir                   full path to output directory (default AssemblyBaseDirectory/spliceAi/)
                           script error exits if the dir already exist
 \
 -v                        flag: if set, verbose output
@@ -63,39 +56,17 @@ then concatenates the result into a four bigWig files (donor/acceptor for +/- st
   $outFileAccMinus.bw
   $outFileDoPlus.bw
   $outFileDoMinus.bw
-that will be located in \$outDir,
-rsyncs that directory to genome and creates links from genome:/var/www/data/assembly and runs updates the browser tracks.
-\
-Afterwards, the four spliceAi tracks are visible in the browser under 'Genes' in 'HL spliceAi'\n";
+that will be located in \$outDir
+";
 
-GetOptions ("v|verbose"  => \$verbose, "doNotLoad" => \$doNotLoad, "keepTempFiles" => \$keepTempFiles,
-         "resolution=i" => \$resolution, "setToZero=f" => \$setToZero, "queue=s" => \$queue, "minScaffoldSize=i" => \$minScaffoldSize,
-         "chunkSize=i" => \$chunkSize, "chunkOverlap=i" => \$chunkOverlap, "maxNumScaffoldsPerJob=i" => \$maxNumScaffoldsPerJob,
-	 "outDir=s" => \$outDir) || die "$usage\n";
+GetOptions ("v|verbose"  => \$verbose, "keepTempFiles" => \$keepTempFiles, "resolution=i" => \$resolution, "setToZero=f" => \$setToZero, 
+         "minScaffoldSize=i" => \$minScaffoldSize, "chunkSize=i" => \$chunkSize, "chunkOverlap=i" => \$chunkOverlap, 
+	 "maxNumScaffoldsPerJob=i" => \$maxNumScaffoldsPerJob, "outDir=s" => \$outDir) || die "$usage\n";
 die "$usage\n" if ($#ARGV < 0);
 
 
-# must be on delta
-#die "ERROR: you must be on delta to execute $0\n" if ($ENV{'HOSTNAME'} ne "delta");
-my $hostname = `hostname`; chomp($hostname); print $hostname;
-die "ERROR: you must be on delta to execute $0\n" if ($hostname ne "delta");
-
 # determine assembly.2bit file
 my $assembly = $ARGV[0];
-# hillerlab default location unless a path is given
-if (index($assembly, "/") == -1) {
-	# if the assembly doesn't exist at the default location, try to copy it from genome
-	if (! -f "/projects/hillerlab/genome/gbdb-HL/$assembly/$assembly.2bit") {
-		my $call = "mkdir -p /projects/hillerlab/genome/gbdb-HL/$assembly/";
-		print "execute $call\n" if ($verbose);
-		system("$call") == 0 || die "ERROR: $call failed\n";
-
-		$call = "rsync -av genome:/genome/gbdb-HL/$assembly/$assembly.2bit genome:/genome/gbdb-HL/$assembly/chrom.sizes /projects/hillerlab/genome/gbdb-HL/$assembly/";
-		print "execute $call\n" if ($verbose);
-		system("$call") == 0 || die "ERROR: $call failed\n";
-	}
-	$assembly = "/projects/hillerlab/genome/gbdb-HL/$assembly/$assembly.2bit";
-}
 die "ERROR: cannot access assembly 2bit at $assembly\n" if (! -f $assembly);
 
 # determine outdir if this was not set
@@ -110,7 +81,7 @@ die "ERROR: $outDir must be a full path, meaning it must start with /\n" if (sub
 
 if ($verbose) {
 	print "2bit file: $assembly\nassembly name: $assemblyName\noutput directory: $outDir\n";
-	print "chunkSize +- overlap: $chunkSize +- $chunkOverlap; pool up to $maxNumScaffoldsPerJob scaffolds per job; queue: $queue\n";
+	print "chunkSize +- overlap: $chunkSize +- $chunkOverlap; pool up to $maxNumScaffoldsPerJob scaffolds per job\n";
 	print "setToZero if < $setToZero; use $resolution digits after the comma\n";
 }
 
@@ -312,9 +283,6 @@ print "$call\n" if ($verbose);
 system("$call") == 0 || die "ERROR: $call failed\n";
 
 open(logFile, ">>$tmpDir/log.txt") || die "ERROR: cannot write to $tmpDir/log.txt\n";
-
-
-
 print "\n==> generated
   $outFileAccPlus.bw
   $outFileAccMinus.bw
@@ -347,44 +315,8 @@ if ($keepTempFiles == 0) {
 	print logFile "WARNING: temp dir $tmpDir is NOT removed. Please cleanup yourself\n";
 }
 
-
-################### Step5: rsync to genome
-if ($doNotLoad == 0) {
-	# we now rsync the outDir (typically /projects/hillerlab/genome/\$assembly/spliceAi/) and link the bw files from /var/www/data/$assemblyName
-	#$call = "(cd $outDir; rsync -av $outFileAccPlus.bw $outFileAccMinus.bw $outFileDoPlus.bw $outFileDoMinus.bw genome:/var/www/data/$assemblyName/)";
-	my $outDirLastDirName = basename($outDir);
-	$call = "rsync -av $outDir/ genome:/genome/gbdb-HL/$assemblyName/$outDirLastDirName";
-	print "rsync bigWigs to genome: $call\n";
-	print logFile "rsync bigWigs to genome: $call\n";
-	system("$call") == 0 || die "ERROR: $call failed\n";
-
-	# now link
-	$call = "ssh genome \"mkdir -p /var/www/data/$assemblyName/ \"";
-	system("$call") == 0 || die "ERROR: $call failed\n";
-	$call = "ssh genome \"(cd /var/www/data/$assemblyName/; \
-		ln -s /genome/gbdb-HL/$assemblyName/$outDirLastDirName/spliceAiAcceptorMinus.bw spliceAiAcceptorMinus.bw;
-		ln -s /genome/gbdb-HL/$assemblyName/$outDirLastDirName/spliceAiAcceptorPlus.bw  spliceAiAcceptorPlus.bw;
-		ln -s /genome/gbdb-HL/$assemblyName/$outDirLastDirName/spliceAiDonorMinus.bw    spliceAiDonorMinus.bw;
-		ln -s /genome/gbdb-HL/$assemblyName/$outDirLastDirName/spliceAiDonorPlus.bw     spliceAiDonorPlus.bw)\"";
-	print "make links from /var/www/data/$assemblyName on genome: $call\n";
-	print logFile "make links from /var/www/data/$assemblyName on genome: $call\n";
-	system("$call") == 0 || die "ERROR: $call failed\n";
-
-	# now run make $assemblyName
-	$call = "ssh genome \"(cd ~/src/userBrowserTracks/hillerlab/; make $assemblyName)\" >> $outDir/log.txt";
-	print "update browser tracks for $assemblyName on genome: $call\n";
-	print logFile "update browser tracks for $assemblyName on genome: $call\n";
-	close(logFile);
-	system("$call") == 0 || die "ERROR: $call failed\n";
-}
-
 open(logFile, ">>$outDir/log.txt") || die "ERROR: cannot write to $outDir/log.txt\n";
 print logFile "** ALL DONE $assemblyName **\n";
 close(logFile);
-
-# gzip
-$call = "gzip -9 $outDir/log.txt";
-print "$call\n" if ($verbose);
-system("$call") == 0 || die "ERROR: $call failed\n";
 
 print "** ALL DONE $assemblyName **\n";
